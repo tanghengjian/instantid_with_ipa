@@ -119,3 +119,24 @@ class Resampler(nn.Module):
             
         latents = self.proj_out(latents)
         return self.norm_out(latents)
+
+
+class MLPProjModel(torch.nn.Module):
+    def __init__(self, cross_attention_dim=768, id_embeddings_dim=512, num_tokens=4):
+        super().__init__()
+        
+        self.cross_attention_dim = cross_attention_dim
+        self.num_tokens = num_tokens
+        
+        self.proj = torch.nn.Sequential(
+            torch.nn.Linear(id_embeddings_dim, id_embeddings_dim*2),
+            torch.nn.GELU(),
+            torch.nn.Linear(id_embeddings_dim*2, cross_attention_dim*num_tokens),
+        )
+        self.norm = torch.nn.LayerNorm(cross_attention_dim)
+        
+    def forward(self, id_embeds):
+        x = self.proj(id_embeds)
+        x = x.reshape(-1, self.num_tokens, self.cross_attention_dim)
+        x = self.norm(x)
+        return x

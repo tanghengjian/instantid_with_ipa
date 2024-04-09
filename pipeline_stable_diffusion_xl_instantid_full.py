@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cv2
 import math
-
+import copy
 import numpy as np
 import PIL.Image
 import torch
@@ -39,7 +39,7 @@ from diffusers import StableDiffusionXLControlNetPipeline
 from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 from diffusers.utils.import_utils import is_xformers_available
 
-from ip_adapter.resampler import Resampler
+from ip_adapter.resampler import Resampler,MLPProjModel
 from ip_adapter.utils import is_torch2_available
 
 if is_torch2_available():
@@ -444,7 +444,7 @@ class LongPromptWeight(object):
             embeds.append(token_embedding)
 
             # get negative prompt embeddings with weights
-            neg_token_tensor = torch.tensor([neg_prompt_token_groups[i]], dtype=torch.long, device=pipe.device)
+            neg_token_tensor = torch.tensor([neg_prompt_token_groups[i]], dtype=torch.long, device=pipe.device)   # pipe.device
             neg_token_tensor_2 = torch.tensor([neg_prompt_token_groups_2[i]], dtype=torch.long, device=pipe.device)
             neg_weight_tensor = torch.tensor(neg_prompt_weight_groups[i], dtype=torch.float16, device=pipe.device)
 
@@ -536,10 +536,15 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
             else:
                 raise ValueError("xformers is not available. Make sure it is installed correctly")
     
-    def load_ip_adapter_instantid(self, model_ckpt, image_emb_dim=512, num_tokens=16, scale=0.5):     
+    def load_ip_adapter_instantid(self, model_ckpt, image_emb_dim=512, num_tokens=16, scale=0.5,model_ckpt_ipa=None):     
         self.set_image_proj_model(model_ckpt, image_emb_dim, num_tokens)
-        self.set_ip_adapter(model_ckpt, num_tokens, scale)
-        
+        if model_ckpt_ipa == None:
+            self.set_ip_adapters([model_ckpt], num_tokens, scale)
+        else:
+            self.set_image_proj_model_ipa(model_ckpt_ipa, image_emb_dim, num_tokens=4)
+            self.set_ip_adapters([model_ckpt,model_ckpt_ipa], num_tokens, scale)
+
+
     def set_image_proj_model(self, model_ckpt, image_emb_dim=512, num_tokens=16):
         
         image_proj_model = Resampler(
@@ -562,7 +567,98 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
         self.image_proj_model.load_state_dict(state_dict)
         
         self.image_proj_model_in_features = image_emb_dim
-    
+
+    def set_image_proj_model_ipa(self, model_ckpt, image_emb_dim=512, num_tokens=4):
+        # referenced from https://github.com/tencent-ailab/IP-Adapter/blob/main/ip_adapter/ip_adapter_faceid_separate.py
+        image_proj_model = MLPProjModel(
+            cross_attention_dim=self.unet.config.cross_attention_dim,
+            id_embeddings_dim=512,
+            num_tokens=num_tokens,
+        ).to(self.device, dtype=self.dtype)
+        
+
+        image_proj_model.eval()
+        
+        self.image_proj_model_ipa = image_proj_model.to(self.device, dtype=self.dtype)
+        state_dict = torch.load(model_ckpt, map_location="cpu")
+        if 'image_proj' in state_dict:
+            state_dict = state_dict["image_proj"]
+        self.image_proj_model_ipa.load_state_dict(state_dict)
+        
+        self.image_proj_model_ipa_in_features = image_emb_dim
+
+    def set_ip_adapters(self, model_ckpts, num_tokens, scale):
+        ipa_flag = False
+        if len(model_ckpts) > 1:
+            ipa_flag = True
+        else:
+            ipa_flag = False
+        print(f"ipa_flag:{ipa_flag}")
+        unet = self.unet
+        attn_procs = {}
+        for name in unet.attn_processors.keys():
+            cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
+            if name.startswith("mid_block"):
+                hidden_size = unet.config.block_out_channels[-1]
+            elif name.startswith("up_blocks"):
+                block_id = int(name[len("up_blocks.")])
+                hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
+            elif name.startswith("down_blocks"):
+                block_id = int(name[len("down_blocks.")])
+                hidden_size = unet.config.block_out_channels[block_id]
+            if cross_attention_dim is None:
+                #print(f"test,set_ip_adapter,AttnProcessor,name:{name}")
+                attn_procs[name] = AttnProcessor().to(unet.device, dtype=unet.dtype)
+            else:
+                #print(f"test,set_ip_adapter,IPAttnProcessor,name:{name}")
+                attn_procs[name] = IPAttnProcessor(hidden_size=hidden_size, 
+                                                   cross_attention_dim=cross_attention_dim, 
+                                                   scale=scale,
+                                                   num_tokens=num_tokens,ipa_flag=ipa_flag).to(unet.device, dtype=unet.dtype)
+        unet.set_attn_processor(attn_procs)
+        
+        #load instantid 
+        state_dict = torch.load(model_ckpts[0], map_location="cpu")
+        ip_layers = torch.nn.ModuleList(self.unet.attn_processors.values())
+        if 'ip_adapter' in state_dict:
+            state_dict = state_dict['ip_adapter']
+        
+        ipa_state_dict_v2=[]
+
+        if len(model_ckpts) > 1:
+            #load ipadapter
+            ipa_state_dict = torch.load(model_ckpts[1], map_location="cpu")
+            ipa_state_dict_v2 = copy.deepcopy(ipa_state_dict)
+
+            ipa_state_dict = ipa_state_dict['ip_adapter']
+
+            ipa_state_dict_v2 = ipa_state_dict_v2['ip_adapter']
+
+            # transfer k_ip to k_ipa , seem as v_ip.
+            for key in ipa_state_dict:
+                #print(key)
+                if "k_ip" in key:
+                    #print(f"find ipa key:{key}")
+                    pre = key.split(".")
+                    #print(pre[0],pre[1],pre[2])
+                    ipa_state_dict_v2[pre[0]+'.'+pre[1]+'a'+'.'+pre[2]] = ipa_state_dict_v2.pop(key)
+
+                if "v_ip" in key:
+                    #print(f"find ipa key:{key}")
+                    pre = key.split(".")
+                    #print(pre[0],pre[1],pre[2])
+                    ipa_state_dict_v2[pre[0]+'.'+pre[1]+'a'+'.'+pre[2]] = ipa_state_dict_v2.pop(key)
+            #print("transfer to")
+
+            #ip_layers = torch.nn.ModuleList(self.unet.attn_processors.values())
+            #ip_layers.load_state_dict(ipa_state_dict_v2,strict=False)
+            merged_dict = {**ipa_state_dict_v2, **state_dict}
+        else:
+            merged_dict = state_dict
+        
+        ip_layers.load_state_dict(merged_dict,strict=False)
+
+
     def set_ip_adapter(self, model_ckpt, num_tokens, scale):
         
         unet = self.unet
@@ -578,8 +674,10 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
                 block_id = int(name[len("down_blocks.")])
                 hidden_size = unet.config.block_out_channels[block_id]
             if cross_attention_dim is None:
+                print(f"test,set_ip_adapter,AttnProcessor,name:{name}")
                 attn_procs[name] = AttnProcessor().to(unet.device, dtype=unet.dtype)
             else:
+                print(f"test,set_ip_adapter,IPAttnProcessor,name:{name}")
                 attn_procs[name] = IPAttnProcessor(hidden_size=hidden_size, 
                                                    cross_attention_dim=cross_attention_dim, 
                                                    scale=scale,
@@ -615,6 +713,30 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
         prompt_image_emb = prompt_image_emb.to(device=self.image_proj_model.latents.device, 
                                                dtype=self.image_proj_model.latents.dtype)
         prompt_image_emb = self.image_proj_model(prompt_image_emb)
+
+        bs_embed, seq_len, _ = prompt_image_emb.shape
+        prompt_image_emb = prompt_image_emb.repeat(1, num_images_per_prompt, 1)
+        prompt_image_emb = prompt_image_emb.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        
+        return prompt_image_emb.to(device=device, dtype=dtype)
+
+    def _encode_prompt_image_emb_ipa(self, prompt_image_emb, device, num_images_per_prompt, dtype, do_classifier_free_guidance):
+        
+        if isinstance(prompt_image_emb, torch.Tensor):
+            prompt_image_emb = prompt_image_emb.clone().detach()
+        else:
+            prompt_image_emb = torch.tensor(prompt_image_emb)
+            
+        prompt_image_emb = prompt_image_emb.reshape([1, -1, self.image_proj_model_ipa_in_features])
+        
+        if do_classifier_free_guidance:
+            prompt_image_emb = torch.cat([torch.zeros_like(prompt_image_emb), prompt_image_emb], dim=0)
+        else:
+            prompt_image_emb = torch.cat([prompt_image_emb], dim=0)
+        
+        prompt_image_emb = prompt_image_emb.to(device=device, 
+                                               dtype=dtype)
+        prompt_image_emb = self.image_proj_model_ipa(prompt_image_emb)
 
         bs_embed, seq_len, _ = prompt_image_emb.shape
         prompt_image_emb = prompt_image_emb.repeat(1, num_images_per_prompt, 1)
@@ -666,7 +788,7 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
 
         # Enhance Face Region
         control_mask = None,
-
+        ipa_flag = 0,
         **kwargs,
     ):
         r"""
@@ -902,7 +1024,15 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
                                                          num_images_per_prompt,
                                                          self.unet.dtype,
                                                          self.do_classifier_free_guidance)
-        
+        print(f"prompt_image_emb.shape:{prompt_image_emb.shape}")
+        if ipa_flag == 1:
+            # 3.2 Encode image prompt for ipa
+            prompt_image_emb_ipa = self._encode_prompt_image_emb_ipa(image_embeds, 
+                                                            device,
+                                                            num_images_per_prompt,
+                                                            self.unet.dtype,
+                                                            self.do_classifier_free_guidance)  
+            print(f"prompt_image_emb_ipa.shape:{prompt_image_emb_ipa.shape}")
         # 4. Prepare image
         if isinstance(controlnet, ControlNetModel):
             image = self.prepare_image(
@@ -1037,7 +1167,10 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
         prompt_embeds = prompt_embeds.to(device)
         add_text_embeds = add_text_embeds.to(device)
         add_time_ids = add_time_ids.to(device).repeat(batch_size * num_images_per_prompt, 1)
-        encoder_hidden_states = torch.cat([prompt_embeds, prompt_image_emb], dim=1)
+        if ipa_flag == 1:
+            encoder_hidden_states = torch.cat([prompt_embeds, prompt_image_emb,prompt_image_emb_ipa], dim=1)
+        else:
+            encoder_hidden_states = torch.cat([prompt_embeds, prompt_image_emb], dim=1)
 
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
@@ -1105,7 +1238,6 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
                                 for down_block_res_sample, mask_weight in zip(down_block_res_samples, control_mask_wight_image_list)
                             ]
                             mid_block_res_sample *= control_mask_wight_image_list[-1]
-
                         down_block_res_samples_list.append(down_block_res_samples)
                         mid_block_res_sample_list.append(mid_block_res_sample)
 
