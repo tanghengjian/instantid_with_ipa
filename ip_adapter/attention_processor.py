@@ -108,7 +108,7 @@ class IPAttnProcessor(nn.Module):
         self.cross_attention_dim = cross_attention_dim
         self.scale = scale
         self.num_tokens = num_tokens
-        self.ipa_flag = ipa_flag
+        
         self.to_k_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
         self.to_v_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
     
@@ -189,37 +189,9 @@ class IPAttnProcessor(nn.Module):
             else:
                 mask = torch.ones_like(ip_hidden_states)
             ip_hidden_states = ip_hidden_states * mask     
-        '''
-        if self.ipa_flag == True:
-        # for ip-adapter original
-            ipa_key = self.to_k_ipa(ip_hidden_states)
-            ipa_value = self.to_v_ipa(ip_hidden_states)
-            
-            ipa_key = attn.head_to_batch_dim(ipa_key)
-            ipa_value = attn.head_to_batch_dim(ipa_value)
-            
-            if xformers_available:
-                ipa_hidden_states = self._memory_efficient_attention_xformers(query, ipa_key, ipa_value, None)
-            else:
-                ipa_attention_probs = attn.get_attention_scores(query, ipa_key, None)
-                ipa_hidden_states = torch.bmm(ip_attention_probs, ipa_value)
-            ipa_hidden_states = attn.batch_to_head_dim(ipa_hidden_states)
-
-            # region control
-            if len(region_control.prompt_image_conditioning) == 1:
-                region_mask = region_control.prompt_image_conditioning[0].get('region_mask', None)
-                if region_mask is not None:
-                    h, w = region_mask.shape[:2]
-                    ratio = (h * w / query.shape[1]) ** 0.5
-                    mask = F.interpolate(region_mask[None, None], scale_factor=1/ratio, mode='nearest').reshape([1, -1, 1])
-                else:
-                    mask = torch.ones_like(ip_hidden_states)
-                ipa_hidden_states = ipa_hidden_states * mask    
-        else:
-            ipa_hidden_states = 0
-        '''
+       
         hidden_states = hidden_states + self.scale * ip_hidden_states 
-        # + self.scale * ipa_hidden_states
+        
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
@@ -357,6 +329,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
         self.hidden_size = hidden_size
         self.cross_attention_dim = cross_attention_dim
         self.scale = scale
+        self.ipa_plus_scale = scale
         self.num_tokens = num_tokens
         self.ipa_flag = ipa_flag
 
@@ -401,17 +374,26 @@ class IPAttnProcessor2_0(torch.nn.Module):
 
         query = attn.to_q(hidden_states)
 
+        ip_hidden_states_ipa = None
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
         else:
-            # get encoder_hidden_states, ip_hidden_states
-            end_pos = encoder_hidden_states.shape[1] - self.num_tokens - 4
-            ipa_end_pos = encoder_hidden_states.shape[1] - 4
-            encoder_hidden_states, ip_hidden_states,ip_hidden_states_ipa = (
-                encoder_hidden_states[:, :end_pos, :],
-                encoder_hidden_states[:, end_pos:ipa_end_pos, :],
-                encoder_hidden_states[:, ipa_end_pos:, :],
-            )
+            # get encoder_hidden_states, ip_hidden_states, ipa_plus_face. 
+            # proj_model's token=16,correspondinged with ipa face model type
+            if self.ipa_flag == True:
+                end_pos = encoder_hidden_states.shape[1] - self.num_tokens - 16
+                ipa_end_pos = encoder_hidden_states.shape[1] - 16
+                encoder_hidden_states, ip_hidden_states,ip_hidden_states_ipa = (
+                    encoder_hidden_states[:, :end_pos, :],
+                    encoder_hidden_states[:, end_pos:ipa_end_pos, :],
+                    encoder_hidden_states[:, ipa_end_pos:, :],
+                )
+            else:
+                end_pos = encoder_hidden_states.shape[1] - self.num_tokens
+                encoder_hidden_states, ip_hidden_states = (
+                    encoder_hidden_states[:, :end_pos, :],
+                    encoder_hidden_states[:, end_pos:, :],
+                )
             if attn.norm_cross:
                 encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
 
@@ -471,7 +453,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
 
 
         if self.ipa_flag == True:
-        # for ip-adapter-faceid_sdxl
+        # for ip-adapter original
             ipa_key = self.to_k_ipa(ipa_hidden_states)
             ipa_value = self.to_v_ipa(ipa_hidden_states)
 
@@ -505,7 +487,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
         else:
             ipa_hidden_states = 0
 
-        hidden_states = hidden_states + self.scale * ip_hidden_states  + 0.3 * ipa_hidden_states
+        hidden_states = hidden_states + self.scale * ip_hidden_states  + self.ipa_plus_scale * ipa_hidden_states
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)

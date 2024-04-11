@@ -120,23 +120,47 @@ class Resampler(nn.Module):
         latents = self.proj_out(latents)
         return self.norm_out(latents)
 
-
-class MLPProjModel(torch.nn.Module):
-    def __init__(self, cross_attention_dim=768, id_embeddings_dim=512, num_tokens=4):
+class ResamplerIpa(nn.Module):
+    def __init__(
+        self,
+        dim=1024,
+        depth=8,
+        dim_head=64,
+        heads=16,
+        num_queries=8,
+        embedding_dim=768,
+        output_dim=1024,
+        ff_mult=4,
+    ):
         super().__init__()
         
-        self.cross_attention_dim = cross_attention_dim
-        self.num_tokens = num_tokens
+        self.latents = nn.Parameter(torch.randn(1, num_queries, dim) / dim**0.5)
         
-        self.proj = torch.nn.Sequential(
-            torch.nn.Linear(id_embeddings_dim, id_embeddings_dim*2),
-            torch.nn.GELU(),
-            torch.nn.Linear(id_embeddings_dim*2, cross_attention_dim*num_tokens),
-        )
-        self.norm = torch.nn.LayerNorm(cross_attention_dim)
+        self.proj_in = nn.Linear(embedding_dim, dim)
+
+        self.proj_out = nn.Linear(dim, output_dim)
+        self.norm_out = nn.LayerNorm(output_dim)
         
-    def forward(self, id_embeds):
-        x = self.proj(id_embeds)
-        x = x.reshape(-1, self.num_tokens, self.cross_attention_dim)
-        x = self.norm(x)
-        return x
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        PerceiverAttention(dim=dim, dim_head=dim_head, heads=heads),
+                        FeedForward(dim=dim, mult=ff_mult),
+                    ]
+                )
+            )
+
+    def forward(self, x):
+        
+        latents = self.latents.repeat(x.size(0), 1, 1)
+        
+        x = self.proj_in(x)
+        
+        for attn, ff in self.layers:
+            latents = attn(x, latents) + latents
+            latents = ff(latents) + latents
+            
+        latents = self.proj_out(latents)
+        return self.norm_out(latents)
