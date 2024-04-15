@@ -552,7 +552,7 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
             self.set_ip_adapters([model_ckpt], num_tokens, scale)
         else:
             self.set_image_proj_model_ipa(model_ckpt_ipa, image_emb_dim, num_tokens=16)
-            self.set_ip_adapters([model_ckpt,model_ckpt_ipa], num_tokens, scale)
+            self.set_ip_adapters([model_ckpt,model_ckpt_ipa], num_tokens, scale, target_blocks=["up_blocks.0.attentions.1"])
 
     def set_image_proj_model_ipa(self, model_ckpt, image_emb_dim=512, num_tokens=16):
             # code from https://github.com/tencent-ailab/IP-Adapter/blob/main/ip_adapter/ip_adapter_faceid_separate.py
@@ -609,7 +609,7 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
         
         self.image_proj_model_in_features = image_emb_dim
     
-    def set_ip_adapters(self, model_ckpts, num_tokens, scale):
+    def set_ip_adapters(self, model_ckpts, num_tokens, scale, target_blocks=None):
         ipa_flag = False
         if len(model_ckpts) > 1:
             ipa_flag = True
@@ -633,10 +633,21 @@ class StableDiffusionXLInstantIDPipeline(StableDiffusionXLControlNetPipeline):
                 attn_procs[name] = AttnProcessor().to(unet.device, dtype=unet.dtype)
             else:
                 #print(f"test,set_ip_adapter,IPAttnProcessor,name:{name}")
-                attn_procs[name] = IPAttnProcessor(hidden_size=hidden_size, 
-                                                   cross_attention_dim=cross_attention_dim, 
-                                                   scale=scale,
-                                                   num_tokens=num_tokens,ipa_flag=ipa_flag).to(unet.device, dtype=unet.dtype)
+                selected = False
+                for block_name in target_blocks:
+                    if block_name in name:
+                        selected = True
+                        break
+                if selected:
+                    attn_procs[name] = IPAttnProcessor(hidden_size=hidden_size, 
+                                                    cross_attention_dim=cross_attention_dim, 
+                                                    scale=scale,
+                                                    num_tokens=num_tokens,ipa_flag=ipa_flag,skip=False).to(unet.device, dtype=unet.dtype)
+                else:
+                    attn_procs[name] = IPAttnProcessor(hidden_size=hidden_size, 
+                                                    cross_attention_dim=cross_attention_dim, 
+                                                    scale=scale,
+                                                    num_tokens=num_tokens,ipa_flag=ipa_flag,skip=True).to(unet.device, dtype=unet.dtype)
         unet.set_attn_processor(attn_procs)
         
         #load instantid 

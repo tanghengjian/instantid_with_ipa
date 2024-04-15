@@ -320,7 +320,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
             The context length of the image features.
     """
 
-    def __init__(self, hidden_size, cross_attention_dim=None, scale=1.0, num_tokens=4,ipa_flag=False):
+    def __init__(self, hidden_size, cross_attention_dim=None, scale=1.0, num_tokens=4,ipa_flag=False, skip=False):
         super().__init__()
 
         if not hasattr(F, "scaled_dot_product_attention"):
@@ -332,6 +332,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
         self.ipa_plus_scale = scale
         self.num_tokens = num_tokens
         self.ipa_flag = ipa_flag
+        self.skip = skip
 
         self.to_k_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
         self.to_v_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
@@ -452,7 +453,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
             ip_hidden_states = ip_hidden_states * mask
 
 
-        if self.ipa_flag == True:
+        if self.ipa_flag == True and not self.skip:
         # for ip-adapter original
             ipa_key = self.to_k_ipa(ipa_hidden_states)
             ipa_value = self.to_v_ipa(ipa_hidden_states)
