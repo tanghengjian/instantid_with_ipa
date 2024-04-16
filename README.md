@@ -1,6 +1,6 @@
 Forked from [InstantID](https://github.com/InstantID/InstantID.git)  
-Ref [IP-Adapter](https://github.com/tencent-ailab/IP-Adapter.git)
-
+Ref [IP-Adapter](https://github.com/tencent-ailab/IP-Adapter.git)  
+Ref [InstantStyle](https://github.com/InstantStyle/InstantStyle.git)  
 Instantid with ipa control
 Attn(q,k,v)+Attn(q,k_id,v_id)+Attn(q,k_ipa,v_ipa)
 
@@ -9,14 +9,14 @@ ipa_plus_adapter model : https://huggingface.co/h94/IP-Adapter/tree/main/sdxl_mo
 image_encoder model: https://huggingface.co/h94/IP-Adapter/tree/main/models/image_encoder 
 
 # usage
-增加ipa_plus  
+open ipa_plus  
 python infer_full-with-ipa.py 1 0.5  
-1表示开启ipa_plus  ，Attn(q,k,v)+Attn(q,k_id,v_id)+Attn(q,k_ipa,v_ipa)
-0.5 表示 ipa attention 权重  
+1 means ipa_plus  ，Attn(q,k,v)+Attn(q,k_id,v_id)+Attn(q,k_ipa,v_ipa)
+0.5 means ipa attention weight  
 
-关闭ipa_plus  
+close ipa_plus  
 python infer_full-wth-ipa.py 0 0  
-0表示关闭ipa_plus，使用原始InstantID注意力，Attn(q,k,v)+Attn(q,k_id,v_id)
+0 close ipa_plus，InstantID original attention workflow，Attn(q,k,v)+Attn(q,k_id,v_id)
 
 # 修改
 ## IPAttnProcessor函数  
